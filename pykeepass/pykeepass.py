@@ -10,7 +10,7 @@ from binascii import Error as BinasciiError
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from construct import Container, ChecksumError, CheckError
+from construct import Container, ListContainer, ChecksumError, CheckError
 
 from lxml import etree
 from lxml.builder import E
@@ -30,9 +30,6 @@ from .xpath import attachment_xp, entry_xp, group_xp, path_xp
 
 logger = logging.getLogger(__name__)
 
-BLANK_DATABASE_FILENAME = "blank_database.kdbx"
-BLANK_DATABASE_LOCATION = os.path.join(os.path.dirname(os.path.realpath(__file__)), BLANK_DATABASE_FILENAME)
-BLANK_DATABASE_PASSWORD = "password"
 
 class PyKeePass:
     """Open a KeePass database
@@ -210,6 +207,58 @@ class PyKeePass:
                 return 'argon2id'
             elif kdf_parameters['$UUID'].value == kdf_uuids['aeskdf']:
                 return 'aeskdf'
+
+    def _get_kdf_parameters(self):
+        """Get KDF parameters dict, raising error if not KDBX4 with Argon2."""
+        if self.version != (4, 0):
+            raise ValueError("KDF parameters only available for KDBX4 databases")
+        kdf_parameters = self.kdbx.header.value.dynamic_header.kdf_parameters.data.dict
+        if kdf_parameters['$UUID'].value not in (kdf_uuids['argon2'], kdf_uuids['argon2id']):
+            raise ValueError("KDF parameters only available for Argon2/Argon2id databases")
+        return kdf_parameters
+
+    def _invalidate_header_cache(self):
+        """Invalidate cached header bytes to force rebuild on save.
+
+        The KDBX header is wrapped in construct's RawCopy which caches the
+        original parsed bytes. When modifying header values (like KDF parameters),
+        we must delete this cache to ensure the modified values are serialized.
+        """
+        if hasattr(self.kdbx.header, 'data'):
+            del self.kdbx.header.data
+        # Also clear cached transformed key since KDF params affect it
+        self.kdbx.body.transformed_key = None
+
+    @property
+    def argon2_iterations(self):
+        """`int`: Argon2 time cost (iterations). Only available for KDBX4 with Argon2."""
+        return self._get_kdf_parameters()['I'].value
+
+    @argon2_iterations.setter
+    def argon2_iterations(self, value):
+        self._get_kdf_parameters()['I'].value = int(value)
+        self._invalidate_header_cache()
+
+    @property
+    def argon2_memory(self):
+        """`int`: Argon2 memory cost in kibibytes (KiB). Only available for KDBX4 with Argon2."""
+        return self._get_kdf_parameters()['M'].value // 1024
+
+    @argon2_memory.setter
+    def argon2_memory(self, value):
+        """Set Argon2 memory cost in kibibytes (KiB)."""
+        self._get_kdf_parameters()['M'].value = int(value) * 1024
+        self._invalidate_header_cache()
+
+    @property
+    def argon2_parallelism(self):
+        """`int`: Argon2 parallelism (threads). Only available for KDBX4 with Argon2."""
+        return self._get_kdf_parameters()['P'].value
+
+    @argon2_parallelism.setter
+    def argon2_parallelism(self, value):
+        self._get_kdf_parameters()['P'].value = int(value)
+        self._invalidate_header_cache()
 
     @property
     def transformed_key(self):
@@ -1029,35 +1078,254 @@ class PyKeePass:
         else:
             return datetime.fromisoformat(text.replace('Z','+00:00')).replace(tzinfo=timezone.utc)
 
-def create_database(
-        filename, password=None, keyfile=None, transformed_key=None
+def _build_kdbx4_structure(
+    encryption='aes256',
+    kdf='argon2id',
+    argon2_iterations=19,
+    argon2_memory=65536,
+    argon2_parallelism=2,
 ):
-    """
-    Create a new database at ``filename`` with supplied credentials.
+    """Build a KDBX4 Container structure from scratch.
 
     Args:
-        filename (`str`, optional): path to database or stream object.
-            If None, the path given when the database was opened is used.
-        password (`str`, optional): database password.  If None,
-            database is assumed to have no password
-        keyfile (`str`, optional): path to keyfile.  If None,
-            database is assumed to have no keyfile
-        transformed_key (`bytes`, optional): precomputed transformed
-            key.
+        encryption (`str`): encryption algorithm ('aes256', 'chacha20', 'twofish')
+        kdf (`str`): key derivation function ('argon2id', 'argon2')
+        argon2_iterations (`int`): Argon2 time cost (iterations)
+        argon2_memory (`int`): Argon2 memory cost in kibibytes (KiB)
+        argon2_parallelism (`int`): Argon2 parallelism (threads)
 
     Returns:
-        `PyKeePass`
+        `Container`: KDBX4 structure ready for building
     """
-    keepass_instance = PyKeePass(
-        BLANK_DATABASE_LOCATION, BLANK_DATABASE_PASSWORD
+    # Validate parameters
+    if encryption not in ('aes256', 'chacha20', 'twofish'):
+        raise ValueError(f"Unsupported encryption: {encryption}")
+    if kdf not in ('argon2id', 'argon2'):
+        raise ValueError(f"Unsupported KDF: {kdf}")
+
+    # Generate random security values
+    master_seed = os.urandom(32)
+    kdf_salt = os.urandom(32)
+    protected_stream_key = os.urandom(64)
+    root_group_uuid = uuid.uuid4().bytes
+
+    # IV size depends on cipher
+    if encryption == 'chacha20':
+        encryption_iv = os.urandom(12)
+    else:  # aes256, twofish
+        encryption_iv = os.urandom(16)
+
+    # Helper for KeePass time encoding (base64-encoded binary timestamp)
+    def encode_time():
+        # KeePass uses seconds since 0001-01-01 00:00:00 UTC, stored as 8-byte LE int
+        # For simplicity, encode current time
+        epoch = datetime(1, 1, 1, tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        seconds = int((now - epoch).total_seconds())
+        return base64.b64encode(struct.pack('<Q', seconds)).decode('ascii')
+
+    def encode_uuid(u):
+        return base64.b64encode(u).decode('ascii')
+
+    null_uuid = b'\x00' * 16
+
+    # Build the XML structure
+    xml_root = E.KeePassFile(
+        E.Meta(
+            E.Generator("pykeepass"),
+            E.DatabaseName("Database"),
+            E.DatabaseNameChanged(encode_time()),
+            E.DatabaseDescription(""),
+            E.DatabaseDescriptionChanged(encode_time()),
+            E.DefaultUserName(""),
+            E.DefaultUserNameChanged(encode_time()),
+            E.MaintenanceHistoryDays("365"),
+            E.Color(""),
+            E.MasterKeyChanged(encode_time()),
+            E.MasterKeyChangeRec("-1"),
+            E.MasterKeyChangeForce("-1"),
+            E.MemoryProtection(
+                E.ProtectTitle("False"),
+                E.ProtectUserName("False"),
+                E.ProtectPassword("True"),
+                E.ProtectURL("False"),
+                E.ProtectNotes("False"),
+            ),
+            E.CustomIcons(),
+            E.RecycleBinEnabled("True"),
+            E.RecycleBinUUID(encode_uuid(null_uuid)),
+            E.RecycleBinChanged(encode_time()),
+            E.EntryTemplatesGroup(encode_uuid(null_uuid)),
+            E.EntryTemplatesGroupChanged(encode_time()),
+            E.LastSelectedGroup(encode_uuid(null_uuid)),
+            E.LastTopVisibleGroup(encode_uuid(null_uuid)),
+            E.HistoryMaxItems("10"),
+            E.HistoryMaxSize("6291456"),
+            E.SettingsChanged(encode_time()),
+            E.CustomData(),
+        ),
+        E.Root(
+            E.Group(
+                E.UUID(encode_uuid(root_group_uuid)),
+                E.Name("Root"),
+                E.Notes(""),
+                E.IconID("48"),
+                E.Times(
+                    E.LastModificationTime(encode_time()),
+                    E.CreationTime(encode_time()),
+                    E.LastAccessTime(encode_time()),
+                    E.ExpiryTime(encode_time()),
+                    E.Expires("False"),
+                    E.UsageCount("0"),
+                    E.LocationChanged(encode_time()),
+                ),
+                E.IsExpanded("True"),
+                E.DefaultAutoTypeSequence(""),
+                E.EnableAutoType("null"),
+                E.EnableSearching("null"),
+                E.LastTopVisibleEntry(encode_uuid(null_uuid)),
+            ),
+            E.DeletedObjects(),
+        ),
+    )
+    xml_tree = etree.ElementTree(xml_root)
+
+    # Build KDF parameters (VariantDictionary format)
+    kdf_uuid = kdf_uuids['argon2id'] if kdf == 'argon2id' else kdf_uuids['argon2']
+    kdf_params = Container(
+        version=b'\x00\x01',
+        dict={
+            '$UUID': Container(type=0x42, key='$UUID', value=kdf_uuid, next_byte=0x05),
+            'I': Container(type=0x05, key='I', value=argon2_iterations, next_byte=0x05),
+            'M': Container(type=0x05, key='M', value=argon2_memory * 1024, next_byte=0x04),
+            'P': Container(type=0x04, key='P', value=argon2_parallelism, next_byte=0x42),
+            'S': Container(type=0x42, key='S', value=kdf_salt, next_byte=0x04),
+            'V': Container(type=0x04, key='V', value=0x13, next_byte=0x00),  # Argon2 version 19
+        }
     )
 
-    keepass_instance.filename = filename
-    keepass_instance.password = password
-    keepass_instance.keyfile = keyfile
+    # Build the complete KDBX structure
+    kdbx = Container(
+        header=Container(
+            # No 'data' attribute - will be built from value
+            value=Container(
+                sig1=b'\x03\xd9\xa2\x9a',
+                sig2=b'\x67\xfb\x4b\xb5',
+                sig_check=True,
+                minor_version=0,
+                major_version=4,
+                dynamic_header=Container({
+                    'cipher_id': Container(id='cipher_id', data=encryption),
+                    'compression_flags': Container(id='compression_flags', data=Container(compression=True)),
+                    'master_seed': Container(id='master_seed', data=master_seed),
+                    'encryption_iv': Container(id='encryption_iv', data=encryption_iv),
+                    'kdf_parameters': Container(id='kdf_parameters', data=kdf_params),
+                    'end': Container(id='end', data=b''),
+                }),
+            ),
+        ),
+        body=Container(
+            transformed_key=None,  # Computed during build
+            master_key=None,  # Computed during build
+            sha256=None,  # Computed during build
+            cred_check=None,  # Computed during build
+            payload=Container(
+                inner_header=Container({
+                    'protected_stream_id': Container(type='protected_stream_id', data='chacha20'),
+                    'protected_stream_key': Container(type='protected_stream_key', data=protected_stream_key),
+                    'binary': ListContainer([]),
+                    'end': Container(type='end', data=b''),
+                }),
+                xml=xml_tree,
+            ),
+        ),
+    )
 
-    keepass_instance.save(transformed_key)
-    return keepass_instance
+    return kdbx
+
+
+def create_database(
+    filename,
+    password=None,
+    keyfile=None,
+    transformed_key=None,
+    encryption='aes256',
+    kdf='argon2id',
+    argon2_iterations=19,
+    argon2_memory=65536,
+    argon2_parallelism=2,
+):
+    """
+    Create a new KDBX4 database at ``filename`` with supplied credentials.
+
+    Args:
+        filename (`str`): path to database or stream object
+        password (`str`, optional): database password. If None,
+            database is assumed to have no password
+        keyfile (`str`, optional): path to keyfile. If None,
+            database is assumed to have no keyfile
+        transformed_key (`bytes`, optional): precomputed transformed key
+        encryption (`str`): encryption algorithm. One of 'aes256' (default),
+            'chacha20', or 'twofish'
+        kdf (`str`): key derivation function. One of 'argon2id' (default)
+            or 'argon2'
+        argon2_iterations (`int`): Argon2 time cost / iterations (default: 19)
+        argon2_memory (`int`): Argon2 memory cost in kibibytes (default: 65536 = 64 MiB)
+        argon2_parallelism (`int`): Argon2 parallelism / threads (default: 2)
+
+    Returns:
+        `PyKeePass`: The newly created database instance
+
+    Example:
+        >>> from pykeepass import create_database
+        >>> kp = create_database('new.kdbx', password='secret')
+
+        >>> # With custom KDF settings for cold storage
+        >>> kp = create_database(
+        ...     'secure.kdbx',
+        ...     password='secret',
+        ...     argon2_iterations=100,
+        ...     argon2_memory=256*1024,  # 256 MiB
+        ...     argon2_parallelism=4
+        ... )
+    """
+    # Build the KDBX4 structure from scratch
+    kdbx = _build_kdbx4_structure(
+        encryption=encryption,
+        kdf=kdf,
+        argon2_iterations=argon2_iterations,
+        argon2_memory=argon2_memory,
+        argon2_parallelism=argon2_parallelism,
+    )
+
+    # Build and save to file
+    if hasattr(filename, "write"):
+        KDBX.build_stream(
+            kdbx,
+            filename,
+            password=password,
+            keyfile=keyfile,
+            transformed_key=transformed_key,
+            decrypt=True,
+        )
+        stream_filename = filename
+    else:
+        KDBX.build_file(
+            kdbx,
+            filename,
+            password=password,
+            keyfile=keyfile,
+            transformed_key=transformed_key,
+            decrypt=True,
+        )
+        stream_filename = None
+
+    # Open the newly created database and return PyKeePass instance
+    if stream_filename:
+        stream_filename.seek(0)
+        return PyKeePass(stream_filename, password=password, keyfile=keyfile)
+    else:
+        return PyKeePass(filename, password=password, keyfile=keyfile)
 
 def debug_setup():
     """Convenience function to quickly enable debug messages"""
