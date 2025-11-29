@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 
-from pykeepass import PyKeePass, icons
+from pykeepass import PyKeePass, create_database, icons, Argon2Config, AesKdfConfig, Cipher, KdfAlgorithm
 from pykeepass.entry import Entry
 from pykeepass.exceptions import BinaryError, CredentialsError, HeaderChecksumError
 from pykeepass.group import Group
@@ -1406,6 +1406,321 @@ class KDBXTests(unittest.TestCase):
 
             self.assertEqual(kp.encryption_algorithm, enc_alg)
             self.assertEqual(kp.version, version)
+
+class CreateDatabaseTests(unittest.TestCase):
+    """Tests for create_database() and KDF parameter customization"""
+
+    def test_create_database_defaults(self):
+        """Test database creation with default parameters"""
+        with BytesIO() as stream:
+            kp = create_database(stream, password='testpass')
+            self.assertEqual(kp.version, (4, 0))
+            self.assertEqual(kp.encryption_algorithm, 'aes256')
+            self.assertEqual(kp.kdf_algorithm, 'argon2id')
+            self.assertEqual(kp.argon2_iterations, 19)
+            self.assertEqual(kp.argon2_memory, 65536)
+            self.assertEqual(kp.argon2_parallelism, 2)
+            self.assertIsNotNone(kp.root_group)
+            self.assertEqual(kp.root_group.name, 'Root')
+
+    def test_create_database_custom_kdf(self):
+        """Test database creation with custom KDF parameters"""
+        with BytesIO() as stream:
+            kp = create_database(
+                stream,
+                password='testpass',
+                kdf=Argon2Config(iterations=50, memory_kib=131072, parallelism=4)
+            )
+            self.assertEqual(kp.argon2_iterations, 50)
+            self.assertEqual(kp.argon2_memory, 131072)
+            self.assertEqual(kp.argon2_parallelism, 4)
+
+    def test_create_database_chacha20(self):
+        """Test database creation with ChaCha20 encryption"""
+        with BytesIO() as stream:
+            kp = create_database(stream, password='testpass', cipher=Cipher.CHACHA20)
+            self.assertEqual(kp.encryption_algorithm, 'chacha20')
+
+    def test_create_database_twofish(self):
+        """Test database creation with Twofish encryption"""
+        with BytesIO() as stream:
+            kp = create_database(stream, password='testpass', cipher=Cipher.TWOFISH)
+            self.assertEqual(kp.encryption_algorithm, 'twofish')
+
+    def test_create_database_argon2d(self):
+        """Test database creation with Argon2d KDF"""
+        with BytesIO() as stream:
+            kp = create_database(
+                stream,
+                password='testpass',
+                kdf=Argon2Config(variant=KdfAlgorithm.ARGON2D)
+            )
+            self.assertEqual(kp.kdf_algorithm, 'argon2')
+
+    def test_create_database_entries_persist(self):
+        """Test that entries persist after save/reload"""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.kdbx', delete=False) as f:
+            db_path = f.name
+        try:
+            kp = create_database(db_path, password='testpass', kdf=Argon2Config.fast())
+            kp.add_entry(kp.root_group, 'Test Entry', 'user', 'secret123')
+            kp.save()
+
+            kp2 = PyKeePass(db_path, password='testpass')
+            self.assertEqual(len(kp2.entries), 1)
+            entry = kp2.find_entries(title='Test Entry', first=True)
+            self.assertEqual(entry.password, 'secret123')
+            self.assertEqual(kp2.argon2_iterations, 3)  # fast preset
+        finally:
+            os.unlink(db_path)
+
+
+class KDFSetterTests(unittest.TestCase):
+    """Tests for KDF parameter setters on existing databases"""
+
+    def test_kdf_setters_modify_and_persist(self):
+        """Test that KDF setters modify values and persist after save"""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.kdbx', delete=False) as f:
+            db_path = f.name
+        try:
+            kp = create_database(db_path, password='testpass')
+            original_iterations = kp.argon2_iterations
+
+            # Modify KDF parameters
+            kp.argon2_iterations = 75
+            kp.argon2_memory = 128 * 1024
+            kp.argon2_parallelism = 6
+            kp.save()
+
+            # Verify changes persisted
+            kp2 = PyKeePass(db_path, password='testpass')
+            self.assertEqual(kp2.argon2_iterations, 75)
+            self.assertEqual(kp2.argon2_memory, 128 * 1024)
+            self.assertEqual(kp2.argon2_parallelism, 6)
+            self.assertNotEqual(kp2.argon2_iterations, original_iterations)
+        finally:
+            os.unlink(db_path)
+
+    def test_kdf_setters_reencrypt_database(self):
+        """Test that changing KDF re-encrypts the database correctly"""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.kdbx', delete=False) as f:
+            db_path = f.name
+        try:
+            # Create database with entry using fast preset
+            kp = create_database(db_path, password='testpass', kdf=Argon2Config.fast())
+            kp.add_entry(kp.root_group, 'Secret', 'admin', 'password123')
+            kp.save()
+
+            # Modify KDF
+            kp = PyKeePass(db_path, password='testpass')
+            kp.argon2_iterations = 50
+            kp.save()
+
+            # Verify entry is still accessible
+            kp2 = PyKeePass(db_path, password='testpass')
+            entry = kp2.find_entries(title='Secret', first=True)
+            self.assertEqual(entry.password, 'password123')
+            self.assertEqual(kp2.argon2_iterations, 50)
+        finally:
+            os.unlink(db_path)
+
+    def test_kdf_setter_invalid_version(self):
+        """Test that Argon2 KDF setters raise error on KDBX3"""
+        kp = PyKeePass(base_dir / 'test3.kdbx', password='password', keyfile=base_dir / 'test3.key')
+        with self.assertRaises(ValueError):
+            _ = kp.argon2_iterations
+
+    def test_transform_rounds_invalid_version(self):
+        """Test that transform_rounds raises error on KDBX4"""
+        with BytesIO() as stream:
+            kp = create_database(stream, password='testpass')
+            with self.assertRaises(ValueError):
+                _ = kp.transform_rounds
+
+    def test_transform_rounds_getter_setter(self):
+        """Test transform_rounds getter and setter on KDBX3"""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.kdbx', delete=False) as f:
+            db_path = f.name
+        try:
+            kp = create_database(db_path, password='testpass', version=3)
+            original_rounds = kp.transform_rounds
+            self.assertEqual(original_rounds, 60000)  # default
+
+            kp.transform_rounds = 100000
+            kp.save()
+
+            kp2 = PyKeePass(db_path, password='testpass')
+            self.assertEqual(kp2.transform_rounds, 100000)
+        finally:
+            os.unlink(db_path)
+
+    def test_argon2_variant_getter_setter(self):
+        """Test argon2_variant getter and setter"""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.kdbx', delete=False) as f:
+            db_path = f.name
+        try:
+            kp = create_database(db_path, password='testpass')
+            self.assertEqual(kp.argon2_variant, 'argon2id')  # default
+
+            kp.argon2_variant = 'argon2d'
+            kp.save()
+
+            kp2 = PyKeePass(db_path, password='testpass')
+            self.assertEqual(kp2.argon2_variant, 'argon2d')
+            self.assertEqual(kp2.kdf_algorithm, 'argon2')
+        finally:
+            os.unlink(db_path)
+
+    def test_argon2_variant_invalid_value(self):
+        """Test that invalid argon2_variant raises error"""
+        with BytesIO() as stream:
+            kp = create_database(stream, password='testpass')
+            with self.assertRaises(ValueError):
+                kp.argon2_variant = 'invalid'
+
+
+class KDBX3CreateDatabaseTests(unittest.TestCase):
+    """Tests for KDBX3 database creation"""
+
+    def test_create_database_kdbx3_defaults(self):
+        """Test KDBX3 database creation with default parameters"""
+        with BytesIO() as stream:
+            kp = create_database(stream, password='testpass', version=3)
+            self.assertEqual(kp.version, (3, 1))
+            self.assertEqual(kp.encryption_algorithm, 'aes256')
+            self.assertIsNotNone(kp.root_group)
+            self.assertEqual(kp.root_group.name, 'Root')
+
+    def test_create_database_kdbx3_custom_rounds(self):
+        """Test KDBX3 database creation with custom AES-KDF rounds"""
+        with BytesIO() as stream:
+            kp = create_database(
+                stream,
+                password='testpass',
+                version=3,
+                kdf=AesKdfConfig(rounds=100000)
+            )
+            self.assertEqual(kp.version, (3, 1))
+
+    def test_create_database_kdbx3_chacha20(self):
+        """Test KDBX3 database creation with ChaCha20 encryption"""
+        with BytesIO() as stream:
+            kp = create_database(
+                stream,
+                password='testpass',
+                version=3,
+                cipher=Cipher.CHACHA20
+            )
+            self.assertEqual(kp.version, (3, 1))
+            self.assertEqual(kp.encryption_algorithm, 'chacha20')
+
+    def test_create_database_kdbx3_twofish(self):
+        """Test KDBX3 database creation with Twofish encryption"""
+        with BytesIO() as stream:
+            kp = create_database(
+                stream,
+                password='testpass',
+                version=3,
+                cipher=Cipher.TWOFISH
+            )
+            self.assertEqual(kp.version, (3, 1))
+            self.assertEqual(kp.encryption_algorithm, 'twofish')
+
+    def test_create_database_kdbx3_entries_persist(self):
+        """Test that entries persist after save/reload in KDBX3"""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.kdbx', delete=False) as f:
+            db_path = f.name
+        try:
+            kp = create_database(db_path, password='testpass', version=3)
+            kp.add_entry(kp.root_group, 'KDBX3 Entry', 'user', 'secret123')
+            kp.save()
+
+            kp2 = PyKeePass(db_path, password='testpass')
+            self.assertEqual(kp2.version, (3, 1))
+            self.assertEqual(len(kp2.entries), 1)
+            entry = kp2.find_entries(title='KDBX3 Entry', first=True)
+            self.assertEqual(entry.password, 'secret123')
+        finally:
+            os.unlink(db_path)
+
+    def test_create_database_kdbx3_wrong_kdf_type_raises(self):
+        """Test that passing Argon2Config to KDBX3 raises TypeError"""
+        with BytesIO() as stream:
+            with self.assertRaises(TypeError):
+                create_database(
+                    stream,
+                    password='testpass',
+                    version=3,
+                    kdf=Argon2Config.standard()
+                )
+
+    def test_create_database_kdbx4_wrong_kdf_type_raises(self):
+        """Test that passing AesKdfConfig to KDBX4 raises TypeError"""
+        with BytesIO() as stream:
+            with self.assertRaises(TypeError):
+                create_database(
+                    stream,
+                    password='testpass',
+                    version=4,
+                    kdf=AesKdfConfig.standard()
+                )
+
+
+class KdfConfigPresetTests(unittest.TestCase):
+    """Tests for KDF configuration dataclass presets"""
+
+    def test_argon2_config_standard(self):
+        """Test Argon2Config standard preset values"""
+        config = Argon2Config.standard()
+        self.assertEqual(config.variant, KdfAlgorithm.ARGON2ID)
+        self.assertEqual(config.iterations, 19)
+        self.assertEqual(config.memory_kib, 65536)
+        self.assertEqual(config.parallelism, 2)
+
+    def test_argon2_config_high_security(self):
+        """Test Argon2Config high_security preset values"""
+        config = Argon2Config.high_security()
+        self.assertEqual(config.variant, KdfAlgorithm.ARGON2ID)
+        self.assertEqual(config.iterations, 100)
+        self.assertEqual(config.memory_kib, 262144)
+        self.assertEqual(config.parallelism, 4)
+
+    def test_argon2_config_fast(self):
+        """Test Argon2Config fast preset values"""
+        config = Argon2Config.fast()
+        self.assertEqual(config.variant, KdfAlgorithm.ARGON2ID)
+        self.assertEqual(config.iterations, 3)
+        self.assertEqual(config.memory_kib, 16384)
+        self.assertEqual(config.parallelism, 2)
+
+    def test_argon2_config_frozen(self):
+        """Test that Argon2Config is immutable"""
+        config = Argon2Config.standard()
+        with self.assertRaises(AttributeError):
+            config.iterations = 100
+
+    def test_aes_kdf_config_standard(self):
+        """Test AesKdfConfig standard preset values"""
+        config = AesKdfConfig.standard()
+        self.assertEqual(config.rounds, 60000)
+
+    def test_aes_kdf_config_high_security(self):
+        """Test AesKdfConfig high_security preset values"""
+        config = AesKdfConfig.high_security()
+        self.assertEqual(config.rounds, 6000000)
+
+    def test_aes_kdf_config_frozen(self):
+        """Test that AesKdfConfig is immutable"""
+        config = AesKdfConfig.standard()
+        with self.assertRaises(AttributeError):
+            config.rounds = 100000
+
 
 if __name__ == '__main__':
     unittest.main()
