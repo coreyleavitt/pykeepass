@@ -269,6 +269,41 @@ class PyKeePass:
         self._invalidate_header_cache()
 
     @property
+    def argon2_variant(self):
+        """`str`: Argon2 variant ('argon2id' or 'argon2d'). Only available for KDBX4 with Argon2."""
+        kdf_params = self._get_kdf_parameters()
+        if kdf_params['$UUID'].value == kdf_uuids['argon2id']:
+            return 'argon2id'
+        elif kdf_params['$UUID'].value == kdf_uuids['argon2']:
+            return 'argon2d'
+
+    @argon2_variant.setter
+    def argon2_variant(self, value):
+        """Set Argon2 variant ('argon2id' or 'argon2d')."""
+        if value == 'argon2id':
+            self._get_kdf_parameters()['$UUID'].value = kdf_uuids['argon2id']
+        elif value in ('argon2d', 'argon2'):
+            self._get_kdf_parameters()['$UUID'].value = kdf_uuids['argon2']
+        else:
+            raise ValueError(f"Invalid Argon2 variant: {value}. Must be 'argon2id' or 'argon2d'")
+        self._invalidate_header_cache()
+
+    @property
+    def transform_rounds(self):
+        """`int`: AES-KDF transform rounds. Only available for KDBX3."""
+        if self.version != (3, 1):
+            raise ValueError("transform_rounds only available for KDBX3 databases")
+        return self.kdbx.header.value.dynamic_header.transform_rounds.data
+
+    @transform_rounds.setter
+    def transform_rounds(self, value):
+        """Set AES-KDF transform rounds."""
+        if self.version != (3, 1):
+            raise ValueError("transform_rounds only available for KDBX3 databases")
+        self.kdbx.header.value.dynamic_header.transform_rounds.data = int(value)
+        self._invalidate_header_cache()
+
+    @property
     def transformed_key(self):
         """`bytes`: transformed key used in database decryption.  May be cached
         and passed to `open` for faster database opening"""
