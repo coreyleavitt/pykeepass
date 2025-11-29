@@ -303,6 +303,58 @@ class PyKeePass:
         self.kdbx.header.value.dynamic_header.transform_rounds.data = int(value)
         self._invalidate_header_cache()
 
+    def convert_version(
+        self,
+        target_version: int,
+        kdf: Argon2Config | AesKdfConfig | None = None,
+    ):
+        """Convert database to a different KDBX version.
+
+        This replaces the internal KDBX structure while preserving all entries,
+        groups, and metadata. The database must be saved after conversion.
+
+        Args:
+            target_version (`int`): Target KDBX version (3 or 4)
+            kdf: KDF configuration for target version. If None, uses default:
+                - KDBX4: Argon2Config.standard()
+                - KDBX3: AesKdfConfig.standard()
+
+        Raises:
+            ValueError: If already at target version or invalid version specified
+
+        Example:
+            >>> kp = PyKeePass('database.kdbx', password='secret')
+            >>> kp.convert_version(3)  # Convert KDBX4 to KDBX3
+            >>> kp.save()
+        """
+        current_version = self.version[0]
+        if current_version == target_version:
+            raise ValueError(f"Database is already KDBX{target_version}")
+        if target_version not in (3, 4):
+            raise ValueError(f"Invalid target version: {target_version}. Must be 3 or 4")
+
+        # Get current cipher
+        cipher = Cipher(self.encryption_algorithm)
+
+        # Build new KDBX structure
+        new_kdbx = build_kdbx_structure(
+            version=target_version,
+            cipher=cipher,
+            kdf=kdf,
+        )
+
+        # Preserve the existing XML tree (contains all entries, groups, metadata)
+        existing_xml = self.tree
+
+        # Replace XML in new structure
+        if target_version == 4:
+            new_kdbx.body.payload.xml = existing_xml
+        else:  # target_version == 3
+            new_kdbx.body.payload.xml = existing_xml
+
+        # Replace the internal KDBX structure
+        self.kdbx = new_kdbx
+
     @property
     def transformed_key(self):
         """`bytes`: transformed key used in database decryption.  May be cached

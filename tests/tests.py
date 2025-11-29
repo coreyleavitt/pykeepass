@@ -1584,6 +1584,106 @@ class KDFSetterTests(unittest.TestCase):
                 kp.argon2_variant = 'invalid'
 
 
+class VersionConversionTests(unittest.TestCase):
+    """Tests for KDBX version conversion"""
+
+    def test_convert_kdbx4_to_kdbx3(self):
+        """Test converting KDBX4 database to KDBX3"""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.kdbx', delete=False) as f:
+            db_path = f.name
+        try:
+            # Create KDBX4 database with entries
+            kp = create_database(db_path, password='testpass')
+            kp.add_entry(kp.root_group, 'Test Entry', 'user', 'secret123')
+            group = kp.add_group(kp.root_group, 'Test Group')
+            kp.add_entry(group, 'Nested Entry', 'admin', 'password456')
+            kp.save()
+
+            # Reopen and convert to KDBX3
+            kp = PyKeePass(db_path, password='testpass')
+            self.assertEqual(kp.version, (4, 0))
+            kp.convert_version(3)
+            self.assertEqual(kp.version, (3, 1))
+            kp.save()
+
+            # Verify entries persisted
+            kp2 = PyKeePass(db_path, password='testpass')
+            self.assertEqual(kp2.version, (3, 1))
+            self.assertEqual(len(kp2.entries), 2)
+            entry = kp2.find_entries(title='Test Entry', first=True)
+            self.assertEqual(entry.password, 'secret123')
+            nested = kp2.find_entries(title='Nested Entry', first=True)
+            self.assertEqual(nested.password, 'password456')
+        finally:
+            os.unlink(db_path)
+
+    def test_convert_kdbx3_to_kdbx4(self):
+        """Test converting KDBX3 database to KDBX4"""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.kdbx', delete=False) as f:
+            db_path = f.name
+        try:
+            # Create KDBX3 database with entries
+            kp = create_database(db_path, password='testpass', version=3)
+            kp.add_entry(kp.root_group, 'Test Entry', 'user', 'secret123')
+            group = kp.add_group(kp.root_group, 'Test Group')
+            kp.add_entry(group, 'Nested Entry', 'admin', 'password456')
+            kp.save()
+
+            # Reopen and convert to KDBX4
+            kp = PyKeePass(db_path, password='testpass')
+            self.assertEqual(kp.version, (3, 1))
+            kp.convert_version(4)
+            self.assertEqual(kp.version, (4, 0))
+            kp.save()
+
+            # Verify entries persisted
+            kp2 = PyKeePass(db_path, password='testpass')
+            self.assertEqual(kp2.version, (4, 0))
+            self.assertEqual(len(kp2.entries), 2)
+            entry = kp2.find_entries(title='Test Entry', first=True)
+            self.assertEqual(entry.password, 'secret123')
+            nested = kp2.find_entries(title='Nested Entry', first=True)
+            self.assertEqual(nested.password, 'password456')
+        finally:
+            os.unlink(db_path)
+
+    def test_convert_with_custom_kdf(self):
+        """Test conversion with custom KDF configuration"""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.kdbx', delete=False) as f:
+            db_path = f.name
+        try:
+            kp = create_database(db_path, password='testpass', version=3)
+            kp.add_entry(kp.root_group, 'Test Entry', 'user', 'secret123')
+            kp.save()
+
+            kp = PyKeePass(db_path, password='testpass')
+            kp.convert_version(4, kdf=Argon2Config.fast())
+            kp.save()
+
+            kp2 = PyKeePass(db_path, password='testpass')
+            self.assertEqual(kp2.version, (4, 0))
+            self.assertEqual(kp2.argon2_iterations, 3)  # fast preset
+        finally:
+            os.unlink(db_path)
+
+    def test_convert_same_version_raises(self):
+        """Test that converting to same version raises error"""
+        with BytesIO() as stream:
+            kp = create_database(stream, password='testpass')
+            with self.assertRaises(ValueError):
+                kp.convert_version(4)
+
+    def test_convert_invalid_version_raises(self):
+        """Test that invalid target version raises error"""
+        with BytesIO() as stream:
+            kp = create_database(stream, password='testpass')
+            with self.assertRaises(ValueError):
+                kp.convert_version(5)
+
+
 class KDBX3CreateDatabaseTests(unittest.TestCase):
     """Tests for KDBX3 database creation"""
 
