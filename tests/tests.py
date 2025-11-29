@@ -1528,10 +1528,60 @@ class KDFSetterTests(unittest.TestCase):
             os.unlink(db_path)
 
     def test_kdf_setter_invalid_version(self):
-        """Test that KDF setters raise error on KDBX3"""
+        """Test that Argon2 KDF setters raise error on KDBX3"""
         kp = PyKeePass(base_dir / 'test3.kdbx', password='password', keyfile=base_dir / 'test3.key')
         with self.assertRaises(ValueError):
             _ = kp.argon2_iterations
+
+    def test_transform_rounds_invalid_version(self):
+        """Test that transform_rounds raises error on KDBX4"""
+        with BytesIO() as stream:
+            kp = create_database(stream, password='testpass')
+            with self.assertRaises(ValueError):
+                _ = kp.transform_rounds
+
+    def test_transform_rounds_getter_setter(self):
+        """Test transform_rounds getter and setter on KDBX3"""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.kdbx', delete=False) as f:
+            db_path = f.name
+        try:
+            kp = create_database(db_path, password='testpass', version=3)
+            original_rounds = kp.transform_rounds
+            self.assertEqual(original_rounds, 60000)  # default
+
+            kp.transform_rounds = 100000
+            kp.save()
+
+            kp2 = PyKeePass(db_path, password='testpass')
+            self.assertEqual(kp2.transform_rounds, 100000)
+        finally:
+            os.unlink(db_path)
+
+    def test_argon2_variant_getter_setter(self):
+        """Test argon2_variant getter and setter"""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.kdbx', delete=False) as f:
+            db_path = f.name
+        try:
+            kp = create_database(db_path, password='testpass')
+            self.assertEqual(kp.argon2_variant, 'argon2id')  # default
+
+            kp.argon2_variant = 'argon2d'
+            kp.save()
+
+            kp2 = PyKeePass(db_path, password='testpass')
+            self.assertEqual(kp2.argon2_variant, 'argon2d')
+            self.assertEqual(kp2.kdf_algorithm, 'argon2')
+        finally:
+            os.unlink(db_path)
+
+    def test_argon2_variant_invalid_value(self):
+        """Test that invalid argon2_variant raises error"""
+        with BytesIO() as stream:
+            kp = create_database(stream, password='testpass')
+            with self.assertRaises(ValueError):
+                kp.argon2_variant = 'invalid'
 
 
 class KDBX3CreateDatabaseTests(unittest.TestCase):
