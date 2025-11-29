@@ -8,5 +8,23 @@ from .group import Group
 from .attachment import Attachment
 from .icons import icons
 from .version import __version__
+from .kdbx_parsing import (
+    Argon2Config,
+    AesKdfConfig,
+    Cipher,
+    KdfAlgorithm,
+)
 
-__all__ = ["__version__", "PyKeePass", "Entry", "Group", "Attachment", "icons", "create_database"]
+__all__ = [
+    "__version__",
+    "PyKeePass",
+    "Entry",
+    "Group",
+    "Attachment",
+    "icons",
+    "create_database",
+    "Argon2Config",
+    "AesKdfConfig",
+    "Cipher",
+    "KdfAlgorithm",
+]
