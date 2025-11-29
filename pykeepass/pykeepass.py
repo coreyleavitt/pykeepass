@@ -10,7 +10,7 @@ from binascii import Error as BinasciiError
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from construct import Container, ChecksumError, CheckError
+from construct import Container, ListContainer, ChecksumError, CheckError
 
 from lxml import etree
 from lxml.builder import E
@@ -25,14 +25,19 @@ from .exceptions import (
     UnableToSendToRecycleBin,
 )
 from .group import Group
-from .kdbx_parsing import KDBX, kdf_uuids
+from .kdbx_parsing import (
+    KDBX,
+    kdf_uuids,
+    build_kdbx_structure,
+    Argon2Config,
+    AesKdfConfig,
+    Cipher,
+    KdfAlgorithm,
+)
 from .xpath import attachment_xp, entry_xp, group_xp, path_xp
 
 logger = logging.getLogger(__name__)
 
-BLANK_DATABASE_FILENAME = "blank_database.kdbx"
-BLANK_DATABASE_LOCATION = os.path.join(os.path.dirname(os.path.realpath(__file__)), BLANK_DATABASE_FILENAME)
-BLANK_DATABASE_PASSWORD = "password"
 
 class PyKeePass:
     """Open a KeePass database
@@ -210,6 +215,93 @@ class PyKeePass:
                 return 'argon2id'
             elif kdf_parameters['$UUID'].value == kdf_uuids['aeskdf']:
                 return 'aeskdf'
+
+    def _get_kdf_parameters(self):
+        """Get KDF parameters dict, raising error if not KDBX4 with Argon2."""
+        if self.version != (4, 0):
+            raise ValueError("KDF parameters only available for KDBX4 databases")
+        kdf_parameters = self.kdbx.header.value.dynamic_header.kdf_parameters.data.dict
+        if kdf_parameters['$UUID'].value not in (kdf_uuids['argon2'], kdf_uuids['argon2id']):
+            raise ValueError("KDF parameters only available for Argon2/Argon2id databases")
+        return kdf_parameters
+
+    def _invalidate_header_cache(self):
+        """Invalidate cached header bytes to force rebuild on save.
+
+        The KDBX header is wrapped in construct's RawCopy which caches the
+        original parsed bytes. When modifying header values (like KDF parameters),
+        we must delete this cache to ensure the modified values are serialized.
+        """
+        if hasattr(self.kdbx.header, 'data'):
+            del self.kdbx.header.data
+        # Also clear cached transformed key since KDF params affect it
+        self.kdbx.body.transformed_key = None
+
+    @property
+    def argon2_iterations(self):
+        """`int`: Argon2 time cost (iterations). Only available for KDBX4 with Argon2."""
+        return self._get_kdf_parameters()['I'].value
+
+    @argon2_iterations.setter
+    def argon2_iterations(self, value):
+        self._get_kdf_parameters()['I'].value = int(value)
+        self._invalidate_header_cache()
+
+    @property
+    def argon2_memory(self):
+        """`int`: Argon2 memory cost in kibibytes (KiB). Only available for KDBX4 with Argon2."""
+        return self._get_kdf_parameters()['M'].value // 1024
+
+    @argon2_memory.setter
+    def argon2_memory(self, value):
+        """Set Argon2 memory cost in kibibytes (KiB)."""
+        self._get_kdf_parameters()['M'].value = int(value) * 1024
+        self._invalidate_header_cache()
+
+    @property
+    def argon2_parallelism(self):
+        """`int`: Argon2 parallelism (threads). Only available for KDBX4 with Argon2."""
+        return self._get_kdf_parameters()['P'].value
+
+    @argon2_parallelism.setter
+    def argon2_parallelism(self, value):
+        self._get_kdf_parameters()['P'].value = int(value)
+        self._invalidate_header_cache()
+
+    @property
+    def argon2_variant(self):
+        """`str`: Argon2 variant ('argon2id' or 'argon2d'). Only available for KDBX4 with Argon2."""
+        kdf_params = self._get_kdf_parameters()
+        if kdf_params['$UUID'].value == kdf_uuids['argon2id']:
+            return 'argon2id'
+        elif kdf_params['$UUID'].value == kdf_uuids['argon2']:
+            return 'argon2d'
+
+    @argon2_variant.setter
+    def argon2_variant(self, value):
+        """Set Argon2 variant ('argon2id' or 'argon2d')."""
+        if value == 'argon2id':
+            self._get_kdf_parameters()['$UUID'].value = kdf_uuids['argon2id']
+        elif value in ('argon2d', 'argon2'):
+            self._get_kdf_parameters()['$UUID'].value = kdf_uuids['argon2']
+        else:
+            raise ValueError(f"Invalid Argon2 variant: {value}. Must be 'argon2id' or 'argon2d'")
+        self._invalidate_header_cache()
+
+    @property
+    def transform_rounds(self):
+        """`int`: AES-KDF transform rounds. Only available for KDBX3."""
+        if self.version != (3, 1):
+            raise ValueError("transform_rounds only available for KDBX3 databases")
+        return self.kdbx.header.value.dynamic_header.transform_rounds.data
+
+    @transform_rounds.setter
+    def transform_rounds(self, value):
+        """Set AES-KDF transform rounds."""
+        if self.version != (3, 1):
+            raise ValueError("transform_rounds only available for KDBX3 databases")
+        self.kdbx.header.value.dynamic_header.transform_rounds.data = int(value)
+        self._invalidate_header_cache()
 
     @property
     def transformed_key(self):
@@ -1030,34 +1122,103 @@ class PyKeePass:
             return datetime.fromisoformat(text.replace('Z','+00:00')).replace(tzinfo=timezone.utc)
 
 def create_database(
-        filename, password=None, keyfile=None, transformed_key=None
+    filename,
+    password=None,
+    keyfile=None,
+    transformed_key=None,
+    version: int = 4,
+    cipher: Cipher | str = Cipher.AES256,
+    kdf: Argon2Config | AesKdfConfig | None = None,
 ):
     """
-    Create a new database at ``filename`` with supplied credentials.
+    Create a new KDBX database at ``filename`` with supplied credentials.
 
     Args:
-        filename (`str`, optional): path to database or stream object.
-            If None, the path given when the database was opened is used.
-        password (`str`, optional): database password.  If None,
+        filename (`str`): path to database or stream object
+        password (`str`, optional): database password. If None,
             database is assumed to have no password
-        keyfile (`str`, optional): path to keyfile.  If None,
+        keyfile (`str`, optional): path to keyfile. If None,
             database is assumed to have no keyfile
-        transformed_key (`bytes`, optional): precomputed transformed
-            key.
+        transformed_key (`bytes`, optional): precomputed transformed key
+        version (`int`): KDBX version (3 or 4). Default is 4.
+        cipher (`Cipher` or `str`): encryption cipher. One of Cipher.AES256 (default),
+            Cipher.CHACHA20, or Cipher.TWOFISH
+        kdf (`Argon2Config` or `AesKdfConfig`, optional): KDF configuration.
+            If None, uses appropriate default for the version:
+            - KDBX4: Argon2Config.standard()
+            - KDBX3: AesKdfConfig.standard()
 
     Returns:
-        `PyKeePass`
+        `PyKeePass`: The newly created database instance
+
+    Example:
+        >>> from pykeepass import create_database, Argon2Config, AesKdfConfig, Cipher
+        >>> kp = create_database('new.kdbx', password='secret')
+
+        >>> # KDBX4 with high security Argon2
+        >>> kp = create_database(
+        ...     'secure.kdbx',
+        ...     password='secret',
+        ...     kdf=Argon2Config.high_security()
+        ... )
+
+        >>> # KDBX4 with custom Argon2 settings
+        >>> kp = create_database(
+        ...     'custom.kdbx',
+        ...     password='secret',
+        ...     kdf=Argon2Config(iterations=100, memory_kib=262144, parallelism=4)
+        ... )
+
+        >>> # KDBX3 database
+        >>> kp = create_database(
+        ...     'legacy.kdbx',
+        ...     password='secret',
+        ...     version=3,
+        ...     kdf=AesKdfConfig(rounds=100000)
+        ... )
+
+        >>> # Using ChaCha20 encryption
+        >>> kp = create_database(
+        ...     'chacha.kdbx',
+        ...     password='secret',
+        ...     cipher=Cipher.CHACHA20
+        ... )
     """
-    keepass_instance = PyKeePass(
-        BLANK_DATABASE_LOCATION, BLANK_DATABASE_PASSWORD
-    )
+    # Normalize cipher to Cipher enum
+    if isinstance(cipher, str):
+        cipher = Cipher(cipher)
 
-    keepass_instance.filename = filename
-    keepass_instance.password = password
-    keepass_instance.keyfile = keyfile
+    # Build the KDBX structure
+    kdbx = build_kdbx_structure(version=version, cipher=cipher, kdf=kdf)
 
-    keepass_instance.save(transformed_key)
-    return keepass_instance
+    # Build and save to file
+    if hasattr(filename, "write"):
+        KDBX.build_stream(
+            kdbx,
+            filename,
+            password=password,
+            keyfile=keyfile,
+            transformed_key=transformed_key,
+            decrypt=True,
+        )
+        stream_filename = filename
+    else:
+        KDBX.build_file(
+            kdbx,
+            filename,
+            password=password,
+            keyfile=keyfile,
+            transformed_key=transformed_key,
+            decrypt=True,
+        )
+        stream_filename = None
+
+    # Open the newly created database and return PyKeePass instance
+    if stream_filename:
+        stream_filename.seek(0)
+        return PyKeePass(stream_filename, password=password, keyfile=keyfile)
+    else:
+        return PyKeePass(filename, password=password, keyfile=keyfile)
 
 def debug_setup():
     """Convenience function to quickly enable debug messages"""
