@@ -3,21 +3,76 @@
 <a href="https://github.com/libkeepass/pykeepass/actions/workflows/ci.yaml"><img src="https://github.com/libkeepass/pykeepass/actions/workflows/ci.yaml/badge.svg"/></a>
 <a href="https://libkeepass.github.io/pykeepass"><img src="https://readthedocs.org/projects/pykeepass/badge/?version=latest"/></a>
 <a href="https://matrix.to/#/%23pykeepass:matrix.org"><img src="https://img.shields.io/badge/chat-%23pykeepass-green"/></a>
-    
-This library allows you to write entries to a KeePass database.
+
+This library allows you to read and write KeePass databases (KDBX3 and KDBX4 formats).
 
 Come chat at [#pykeepass:matrix.org](https://matrix.to/#/%23pykeepass:matrix.org) on Matrix.
 
 # Installation
 
+Requires Python 3.11+
+
 ``` bash
-sudo apt install python3-lxml
+pip install pykeepass
+```
+
+On Debian/Ubuntu, you may need to install lxml dependencies first:
+
+``` bash
+sudo apt install libxml2-dev libxmlsec1-dev
 pip install pykeepass
 ```
 
 # Quickstart
 
-General database manipulation
+## Creating a Database
+
+``` python
+from pykeepass import create_database
+
+# create a new KDBX4 database with default settings (Argon2id, AES-256)
+>>> kp = create_database('new.kdbx', password='somePassw0rd')
+
+# create with a keyfile
+>>> kp = create_database('new.kdbx', password='somePassw0rd', keyfile='key.key')
+
+# create a KDBX3 database
+>>> kp = create_database('new.kdbx', password='somePassw0rd', version=3)
+```
+
+### Cipher and KDF Options
+
+``` python
+from pykeepass import create_database
+from pykeepass.kdbx_parsing import Cipher, Argon2Config, AesKdfConfig
+
+# KDBX4 with ChaCha20 cipher and custom Argon2 settings
+>>> kp = create_database(
+...     'new.kdbx',
+...     password='somePassw0rd',
+...     cipher=Cipher.chacha20,
+...     kdf=Argon2Config(iterations=5, memory=131072, parallelism=4, variant='id'),
+... )
+
+# use preset configurations
+>>> kp = create_database('new.kdbx', password='pw', kdf=Argon2Config.high_security())
+>>> kp = create_database('new.kdbx', password='pw', kdf=Argon2Config.fast())
+
+# KDBX3 with Twofish cipher and custom AES-KDF rounds
+>>> kp = create_database(
+...     'new.kdbx',
+...     password='somePassw0rd',
+...     version=3,
+...     cipher=Cipher.twofish,
+...     kdf=AesKdfConfig(rounds=100000),
+... )
+```
+
+Available ciphers: `aes256`, `chacha20`, `twofish`
+
+Available Argon2 variants (KDBX4): `id`, `d`, `i`
+
+## Opening and Manipulating Databases
 
 ``` python
 from pykeepass import PyKeePass
@@ -59,7 +114,7 @@ Entry: "email/gmail (myusername)"
 >>> kp.save()
 ```
 
-Finding and manipulating entries
+## Finding and Manipulating Entries
 
 ``` python
 # add a new entry to the Root group
@@ -94,7 +149,7 @@ Entry: "testing (foo_user)"
 >>> entry.save_history()
 ```
 
-Finding and manipulating groups
+## Finding and Manipulating Groups
 
 ``` python
 >>> kp.groups
@@ -142,7 +197,7 @@ Group: "social/gmail"
 >>> group.touch(modify=True)
 ```
 
-Attachments
+## Attachments
 
 ``` python
 >>> e = kp.add_entry(kp.root_group, title='foo', username='', password='')
@@ -176,16 +231,16 @@ b'Hello world'
 
 # search attachments
 >>> kp.find_attachments(filename='hello.txt')
-[Attachment: 'hello.txt** -> 0]
+[Attachment: 'hello.txt' -> 0]
 
 # delete attachment reference
 >>> e.delete_attachment(a)
 
 # or, delete both attachment reference and binary
->>> kp.delete_binary(binary_id**
+>>> kp.delete_binary(binary_id)
 ```
 
-OTP codes
+## OTP Codes
 
 ``` python
 # find an entry which has otp attribute
@@ -195,10 +250,35 @@ OTP codes
 799270
 ```
 
+## Modifying KDF Parameters
+
+You can adjust key derivation function parameters on an existing database:
+
+``` python
+# KDBX4: Argon2 parameters
+>>> kp.argon2_iterations = 10
+>>> kp.argon2_memory = 131072  # in KB
+>>> kp.argon2_parallelism = 4
+>>> kp.argon2_variant = 'id'  # 'id', 'd', or 'i'
+
+# KDBX3: AES-KDF rounds
+>>> kp.transform_rounds = 100000
+
+# changes take effect on next save()
+>>> kp.save()
+```
+
+Note: Changing KDF parameters requires re-encrypting the database with the new settings.
+
 
 # Tests and Debugging
 
-Run tests with `python tests/tests.py` or `python tests/tests.py SomeSpecificTest`
+Run tests with pytest:
+
+``` bash
+pytest tests/ -v
+pytest tests/ -v -k 'SomeSpecificTest'
+```
 
 Enable debugging when doing tests in console:
 
