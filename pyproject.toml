@@ -31,7 +31,7 @@ classifiers = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
-    "pdoc>=15.0.0",
+    "pdoc>=15.0.4",
 ]
 
 [project.urls]
