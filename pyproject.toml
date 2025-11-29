@@ -1,38 +1,38 @@
 [project]
 name = "pykeepass"
-# setuptools normalizes semver '-' to '.'
-# avoid using hyphens: 1.2.3.post1
-version = "4.1.1.post1"
+version = "4.2.0"
 readme = "README.md"
 description = "Python library to interact with keepass databases (supports KDBX3 and KDBX4)"
 authors = [
     { name = "Philipp Schmitt", email = "philipp@schmitt.co" },
-    { name = "Evan Widloski", email = "evan_gh@widloski.com" }
+    { name = "Evan Widloski", email = "evan_gh@widloski.com" },
+    { name = "Corey Leavitt", email = "corey@leavitt.info" }
 ]
-license = {text = "GPL-3.0"}
-keywords = ["vault", "keepass"]
-requires-python = ">=3.7"
+license = { text = "GPL-3.0" }
+keywords = ["vault", "keepass", "kdbx", "password-manager"]
+requires-python = ">=3.10"
 dependencies = [
+    "argon2-cffi>=23.1.0",
+    "construct>=2.10.70",
+    "lxml>=5.3.0",
+    "pycryptodomex>=3.21.0",
     "pyotp>=2.9.0",
-    "setuptools; python_version<'3.8'",
-    "construct>=2.10.53",
-    "argon2_cffi>=18.1.0",
-    "pycryptodomex>=3.6.2",
-    "lxml",
 ]
 classifiers = [
     "Topic :: Security",
     "Topic :: Software Development :: Libraries",
     "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
-    "Programming Language :: Python :: 3.7",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
 
 [project.optional-dependencies]
-test = ["pyotp", "pdoc"]
+dev = [
+    "pytest>=8.0.0",
+    "pdoc>=15.0.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/libkeepass/pykeepass"
@@ -40,10 +40,13 @@ Repository = "https://github.com/libkeepass/pykeepass"
 Issues = "https://github.com/libkeepass/pykeepass/issues"
 Changelog = "https://github.com/libkeepass/pykeepass/blob/master/CHANGELOG.rst"
 
-[tool.setuptools]
-packages = ["pykeepass", "pykeepass.kdbx_parsing"]
-include-package-data = true
-
 [build-system]
-requires = ["setuptools>=59.0.0"]
-build-backend = 'setuptools.build_meta'
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pykeepass"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["tests.py", "test_*.py"]
