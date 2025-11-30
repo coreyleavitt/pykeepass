@@ -148,7 +148,7 @@ class PyKeePass:
 
         self.read(self.filename, self.password, self.keyfile)
 
-    def save(self, filename=None, transformed_key=None):
+    def save(self, filename=None, transformed_key=None, regenerate_seeds: bool = True):
         """Save current database object to disk.
 
         Args:
@@ -156,38 +156,86 @@ class PyKeePass:
                 If None, the path given when the database was opened is used.
                 PyKeePass.filename is unchanged.
             transformed_key (`bytes`, optional): precomputed transformed
-                key.
+                key. Ignored if regenerate_seeds is True.
+            regenerate_seeds (`bool`): regenerate cryptographic seeds on save
+                for security (default True). Set False only for testing or if
+                you need reproducible output.
         """
+        from io import BytesIO
 
         if not filename:
             filename = self.filename
 
-        if hasattr(filename, "write"):
-            KDBX.build_stream(
-                self.kdbx,
-                filename,
-                password=self.password,
-                keyfile=self.keyfile,
-                transformed_key=transformed_key,
-                decrypt=True
-            )
-        else:
-            # save to temporary file to prevent database clobbering
-            # see issues 223, 101
-            filename_tmp = Path(filename).with_suffix('.tmp')
-            try:
-                KDBX.build_file(
+        # Capture seeds for rollback if save fails
+        saved_seeds = None
+        if regenerate_seeds:
+            header = self.kdbx.header.value.dynamic_header
+            if self.version == (4, 0):
+                saved_seeds = {
+                    'master_seed': header.master_seed.data,
+                    'encryption_iv': header.encryption_iv.data,
+                    'kdf_salt': header.kdf_parameters.data.dict['S'].value,
+                    'protected_stream_key': self.kdbx.body.payload.inner_header['protected_stream_key'].data,
+                }
+            else:
+                saved_seeds = {
+                    'master_seed': header.master_seed.data,
+                    'encryption_iv': header.encryption_iv.data,
+                    'transform_seed': header.transform_seed.data,
+                    'protected_stream_key': header.protected_stream_key.data,
+                    'stream_start_bytes': header.stream_start_bytes.data,
+                }
+            self._regenerate_seeds()
+            transformed_key = None  # Must recompute with new seeds
+
+        try:
+            if hasattr(filename, "write"):
+                # Write to temp buffer first to prevent stream corruption (issue 223)
+                temp_buffer = BytesIO()
+                KDBX.build_stream(
                     self.kdbx,
-                    filename_tmp,
+                    temp_buffer,
                     password=self.password,
                     keyfile=self.keyfile,
                     transformed_key=transformed_key,
                     decrypt=True
                 )
-            except Exception as e:
-                os.remove(filename_tmp)
-                raise e
-            shutil.move(filename_tmp, filename)
+                # Success - copy to real stream
+                filename.seek(0)
+                filename.write(temp_buffer.getvalue())
+                filename.truncate()
+            else:
+                # save to temporary file to prevent database clobbering
+                # see issues 223, 101
+                filename_tmp = Path(filename).with_suffix('.tmp')
+                try:
+                    KDBX.build_file(
+                        self.kdbx,
+                        filename_tmp,
+                        password=self.password,
+                        keyfile=self.keyfile,
+                        transformed_key=transformed_key,
+                        decrypt=True
+                    )
+                except Exception as e:
+                    os.remove(filename_tmp)
+                    raise e
+                shutil.move(filename_tmp, filename)
+        except Exception as e:
+            # Restore seeds on failure so internal state isn't corrupted
+            if saved_seeds:
+                header = self.kdbx.header.value.dynamic_header
+                header.master_seed.data = saved_seeds['master_seed']
+                header.encryption_iv.data = saved_seeds['encryption_iv']
+                if self.version == (4, 0):
+                    header.kdf_parameters.data.dict['S'].value = saved_seeds['kdf_salt']
+                    self.kdbx.body.payload.inner_header['protected_stream_key'].data = saved_seeds['protected_stream_key']
+                else:
+                    header.transform_seed.data = saved_seeds['transform_seed']
+                    header.protected_stream_key.data = saved_seeds['protected_stream_key']
+                    header.stream_start_bytes.data = saved_seeds['stream_start_bytes']
+                self._invalidate_header_cache()
+            raise
 
     @property
     def version(self):
@@ -274,6 +322,41 @@ class PyKeePass:
             del self.kdbx.header.data
         # Also clear cached transformed key since KDF params affect it
         self.kdbx.body.transformed_key = None
+
+    def _regenerate_seeds(self) -> None:
+        """Regenerate all cryptographic seeds/salts for security.
+
+        This addresses the security vulnerability where reusing seeds across
+        saves can enable precomputation attacks. Should be called before save().
+
+        Regenerates (per KeePass spec):
+        - master_seed: Main encryption seed
+        - encryption_iv: Cipher initialization vector
+        - KDF salt: Key derivation salt (transform_seed for KDBX3, S param for KDBX4)
+        - protected_stream_key: Key for protected field encryption
+        - stream_start_bytes: Payload verification bytes (KDBX3 only)
+
+        See: https://github.com/libkeepass/pykeepass/issues/219
+        """
+        header = self.kdbx.header.value.dynamic_header
+        cipher = header.cipher_id.data
+
+        # Regenerate common seeds
+        header.master_seed.data = os.urandom(32)
+        header.encryption_iv.data = os.urandom(IV_SIZES[cipher])
+
+        if self.version == (4, 0):
+            # KDBX4: KDF salt is in kdf_parameters, protected_stream_key in inner header
+            kdf_params = header.kdf_parameters.data.dict
+            kdf_params['S'].value = os.urandom(32)
+            self.kdbx.body.payload.inner_header['protected_stream_key'].data = os.urandom(64)
+        else:
+            # KDBX3: All seeds in header
+            header.transform_seed.data = os.urandom(32)
+            header.protected_stream_key.data = os.urandom(32)
+            header.stream_start_bytes.data = os.urandom(32)
+
+        self._invalidate_header_cache()
 
     @property
     def argon2_iterations(self):

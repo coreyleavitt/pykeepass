@@ -1309,9 +1309,12 @@ class KDBXTests(unittest.TestCase):
             self.assertEqual(kp.kdf_algorithm, kdf_algorithm)
             self.assertEqual(kp.version, version)
 
+            # When using pre-computed transformed_key, don't regenerate seeds
+            # as that would invalidate the key
             kp.save(
                 filename_out,
-                transformed_key=transformed_key
+                transformed_key=transformed_key,
+                regenerate_seeds=(transformed_key is None)
             )
 
             if hasattr(filename_out, "seek"):
@@ -1702,6 +1705,102 @@ class KdfAlgorithmSetterTests(unittest.TestCase):
             kp = create_database(stream, password='testpass')
             with self.assertRaises(ValueError):
                 kp.kdf_algorithm = 'invalid'
+
+
+class SeedRegenerationTests(unittest.TestCase):
+    """Tests for seed regeneration on save (resolves libkeepass/pykeepass#219)"""
+
+    def test_seeds_regenerate_on_save_kdbx4(self):
+        """Test that seeds change on save for KDBX4"""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.kdbx', delete=False) as f:
+            db_path = f.name
+        try:
+            kp = create_database(db_path, password='testpass')
+            kp.add_entry(kp.root_group, 'Test', 'user', 'secret123')
+            kp.save()
+
+            kp = PyKeePass(db_path, password='testpass')
+            old_master_seed = kp.kdbx.header.value.dynamic_header.master_seed.data
+            old_iv = kp.kdbx.header.value.dynamic_header.encryption_iv.data
+            old_kdf_salt = kp.kdbx.header.value.dynamic_header.kdf_parameters.data.dict['S'].value
+            old_protected_key = kp.kdbx.body.payload.inner_header['protected_stream_key'].data
+
+            kp.save()
+
+            kp2 = PyKeePass(db_path, password='testpass')
+            self.assertNotEqual(old_master_seed, kp2.kdbx.header.value.dynamic_header.master_seed.data)
+            self.assertNotEqual(old_iv, kp2.kdbx.header.value.dynamic_header.encryption_iv.data)
+            self.assertNotEqual(old_kdf_salt, kp2.kdbx.header.value.dynamic_header.kdf_parameters.data.dict['S'].value)
+            self.assertNotEqual(old_protected_key, kp2.kdbx.body.payload.inner_header['protected_stream_key'].data)
+
+            # Verify data is still accessible
+            entry = kp2.find_entries(title='Test', first=True)
+            self.assertEqual(entry.password, 'secret123')
+        finally:
+            os.unlink(db_path)
+
+    def test_seeds_regenerate_on_save_kdbx3(self):
+        """Test that seeds change on save for KDBX3"""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.kdbx', delete=False) as f:
+            db_path = f.name
+        try:
+            kp = create_database(db_path, password='testpass', version=3)
+            kp.add_entry(kp.root_group, 'Test', 'user', 'secret123')
+            kp.save()
+
+            kp = PyKeePass(db_path, password='testpass')
+            old_master_seed = kp.kdbx.header.value.dynamic_header.master_seed.data
+            old_iv = kp.kdbx.header.value.dynamic_header.encryption_iv.data
+            old_transform_seed = kp.kdbx.header.value.dynamic_header.transform_seed.data
+            old_protected_key = kp.kdbx.header.value.dynamic_header.protected_stream_key.data
+            old_stream_start = kp.kdbx.header.value.dynamic_header.stream_start_bytes.data
+
+            kp.save()
+
+            kp2 = PyKeePass(db_path, password='testpass')
+            self.assertNotEqual(old_master_seed, kp2.kdbx.header.value.dynamic_header.master_seed.data)
+            self.assertNotEqual(old_iv, kp2.kdbx.header.value.dynamic_header.encryption_iv.data)
+            self.assertNotEqual(old_transform_seed, kp2.kdbx.header.value.dynamic_header.transform_seed.data)
+            self.assertNotEqual(old_protected_key, kp2.kdbx.header.value.dynamic_header.protected_stream_key.data)
+            self.assertNotEqual(old_stream_start, kp2.kdbx.header.value.dynamic_header.stream_start_bytes.data)
+
+            # Verify data is still accessible
+            entry = kp2.find_entries(title='Test', first=True)
+            self.assertEqual(entry.password, 'secret123')
+        finally:
+            os.unlink(db_path)
+
+    def test_seeds_no_regenerate_when_disabled(self):
+        """Test that seeds don't change when regenerate_seeds=False"""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.kdbx', delete=False) as f:
+            db_path = f.name
+        try:
+            kp = create_database(db_path, password='testpass')
+            kp.save(regenerate_seeds=False)
+
+            kp = PyKeePass(db_path, password='testpass')
+            old_master_seed = kp.kdbx.header.value.dynamic_header.master_seed.data
+
+            kp.save(regenerate_seeds=False)
+
+            kp2 = PyKeePass(db_path, password='testpass')
+            self.assertEqual(old_master_seed, kp2.kdbx.header.value.dynamic_header.master_seed.data)
+        finally:
+            os.unlink(db_path)
+
+    def test_different_databases_have_different_seeds(self):
+        """Test that create_database generates unique seeds each time"""
+        with BytesIO() as stream1, BytesIO() as stream2:
+            kp1 = create_database(stream1, password='test')
+            kp2 = create_database(stream2, password='test')
+
+            self.assertNotEqual(
+                kp1.kdbx.header.value.dynamic_header.master_seed.data,
+                kp2.kdbx.header.value.dynamic_header.master_seed.data
+            )
 
 
 class KDBX3CreateDatabaseTests(unittest.TestCase):
