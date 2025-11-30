@@ -1261,20 +1261,20 @@ class KDBXTests(unittest.TestCase):
         ]
         kdf_algorithms = [
             'aeskdf',
-            'argon2',
+            'argon2d',
             'aeskdf',
-            'argon2',
-            'argon2',
-            'argon2',
+            'argon2d',
+            'argon2d',
+            'argon2d',
             'aeskdf',
-            'argon2',
+            'argon2d',
             'aeskdf',
-            'argon2',
-            'argon2',
-            'argon2',
+            'argon2d',
+            'argon2d',
+            'argon2d',
             'argon2id',
-            'argon2',
-            'argon2',
+            'argon2d',
+            'argon2d',
         ]
         versions = [
             (3, 1),
@@ -1455,7 +1455,7 @@ class CreateDatabaseTests(unittest.TestCase):
                 password='testpass',
                 kdf=Argon2Config(variant=KdfAlgorithm.ARGON2D)
             )
-            self.assertEqual(kp.kdf_algorithm, 'argon2')
+            self.assertEqual(kp.kdf_algorithm, 'argon2d')
 
     def test_create_database_entries_persist(self):
         """Test that entries persist after save/reload"""
@@ -1572,7 +1572,7 @@ class KDFSetterTests(unittest.TestCase):
 
             kp2 = PyKeePass(db_path, password='testpass')
             self.assertEqual(kp2.argon2_variant, 'argon2d')
-            self.assertEqual(kp2.kdf_algorithm, 'argon2')
+            self.assertEqual(kp2.kdf_algorithm, 'argon2d')
         finally:
             os.unlink(db_path)
 
@@ -1582,6 +1582,126 @@ class KDFSetterTests(unittest.TestCase):
             kp = create_database(stream, password='testpass')
             with self.assertRaises(ValueError):
                 kp.argon2_variant = 'invalid'
+
+
+class EncryptionAlgorithmSetterTests(unittest.TestCase):
+    """Tests for encryption_algorithm setter (resolves libkeepass/pykeepass#233)"""
+
+    def test_encryption_algorithm_setter_kdbx4(self):
+        """Test changing cipher on KDBX4 database"""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.kdbx', delete=False) as f:
+            db_path = f.name
+        try:
+            kp = create_database(db_path, password='testpass')
+            kp.add_entry(kp.root_group, 'Test Entry', 'user', 'secret123')
+            self.assertEqual(kp.encryption_algorithm, 'aes256')
+
+            kp.encryption_algorithm = 'chacha20'
+            kp.save()
+
+            kp2 = PyKeePass(db_path, password='testpass')
+            self.assertEqual(kp2.encryption_algorithm, 'chacha20')
+            entry = kp2.find_entries(title='Test Entry', first=True)
+            self.assertEqual(entry.password, 'secret123')
+        finally:
+            os.unlink(db_path)
+
+    def test_encryption_algorithm_setter_kdbx3(self):
+        """Test changing cipher on KDBX3 database"""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.kdbx', delete=False) as f:
+            db_path = f.name
+        try:
+            kp = create_database(db_path, password='testpass', version=3)
+            kp.add_entry(kp.root_group, 'Test Entry', 'user', 'secret123')
+            self.assertEqual(kp.encryption_algorithm, 'aes256')
+
+            kp.encryption_algorithm = 'twofish'
+            kp.save()
+
+            kp2 = PyKeePass(db_path, password='testpass')
+            self.assertEqual(kp2.encryption_algorithm, 'twofish')
+            entry = kp2.find_entries(title='Test Entry', first=True)
+            self.assertEqual(entry.password, 'secret123')
+        finally:
+            os.unlink(db_path)
+
+    def test_encryption_algorithm_setter_with_enum(self):
+        """Test setting cipher using Cipher enum"""
+        with BytesIO() as stream:
+            kp = create_database(stream, password='testpass')
+            kp.encryption_algorithm = Cipher.CHACHA20
+            self.assertEqual(kp.encryption_algorithm, 'chacha20')
+
+    def test_encryption_algorithm_setter_invalid(self):
+        """Test that invalid cipher raises error"""
+        with BytesIO() as stream:
+            kp = create_database(stream, password='testpass')
+            with self.assertRaises(ValueError):
+                kp.encryption_algorithm = 'invalid'
+
+
+class KdfAlgorithmSetterTests(unittest.TestCase):
+    """Tests for kdf_algorithm setter (resolves libkeepass/pykeepass#233)"""
+
+    def test_kdf_algorithm_setter_to_aeskdf(self):
+        """Test switching from Argon2 to AES-KDF on KDBX4"""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.kdbx', delete=False) as f:
+            db_path = f.name
+        try:
+            kp = create_database(db_path, password='testpass')
+            kp.add_entry(kp.root_group, 'Test Entry', 'user', 'secret123')
+            self.assertEqual(kp.kdf_algorithm, 'argon2id')
+
+            kp.kdf_algorithm = 'aeskdf'
+            kp.save()
+
+            kp2 = PyKeePass(db_path, password='testpass')
+            self.assertEqual(kp2.kdf_algorithm, 'aeskdf')
+            entry = kp2.find_entries(title='Test Entry', first=True)
+            self.assertEqual(entry.password, 'secret123')
+        finally:
+            os.unlink(db_path)
+
+    def test_kdf_algorithm_setter_to_argon2d(self):
+        """Test switching to Argon2d on KDBX4"""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.kdbx', delete=False) as f:
+            db_path = f.name
+        try:
+            kp = create_database(db_path, password='testpass')
+            self.assertEqual(kp.kdf_algorithm, 'argon2id')
+
+            kp.kdf_algorithm = 'argon2d'
+            kp.save()
+
+            kp2 = PyKeePass(db_path, password='testpass')
+            self.assertEqual(kp2.kdf_algorithm, 'argon2d')
+        finally:
+            os.unlink(db_path)
+
+    def test_kdf_algorithm_setter_with_enum(self):
+        """Test setting KDF using KdfAlgorithm enum"""
+        with BytesIO() as stream:
+            kp = create_database(stream, password='testpass')
+            kp.kdf_algorithm = KdfAlgorithm.AES_KDF
+            self.assertEqual(kp.kdf_algorithm, 'aeskdf')
+
+    def test_kdf_algorithm_setter_invalid_on_kdbx3(self):
+        """Test that changing KDF on KDBX3 raises error"""
+        with BytesIO() as stream:
+            kp = create_database(stream, password='testpass', version=3)
+            with self.assertRaises(ValueError):
+                kp.kdf_algorithm = 'argon2id'
+
+    def test_kdf_algorithm_setter_invalid_value(self):
+        """Test that invalid KDF raises error"""
+        with BytesIO() as stream:
+            kp = create_database(stream, password='testpass')
+            with self.assertRaises(ValueError):
+                kp.kdf_algorithm = 'invalid'
 
 
 class KDBX3CreateDatabaseTests(unittest.TestCase):

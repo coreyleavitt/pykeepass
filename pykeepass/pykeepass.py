@@ -29,10 +29,13 @@ from .kdbx_parsing import (
     KDBX,
     kdf_uuids,
     build_kdbx_structure,
+    build_kdf_parameters_argon2,
+    build_kdf_parameters_aeskdf,
     Argon2Config,
     AesKdfConfig,
     Cipher,
     KdfAlgorithm,
+    IV_SIZES,
 )
 from .xpath import attachment_xp, entry_xp, group_xp, path_xp
 
@@ -196,25 +199,60 @@ class PyKeePass:
         )
 
     @property
-    def encryption_algorithm(self):
-        """`str`: encryption algorithm used by database during decryption.
-        Can be one of 'aes256', 'chacha20', or 'twofish'."""
+    def encryption_algorithm(self) -> str:
+        """Encryption algorithm used by database. One of the Cipher enum values."""
         return self.kdbx.header.value.dynamic_header.cipher_id.data
 
+    @encryption_algorithm.setter
+    def encryption_algorithm(self, value: Cipher | str) -> None:
+        """Set encryption algorithm. Generates new IV with appropriate size."""
+        cipher = str(Cipher(value))
+        self.kdbx.header.value.dynamic_header.cipher_id.data = cipher
+        self.kdbx.header.value.dynamic_header.encryption_iv.data = os.urandom(IV_SIZES[cipher])
+        self._invalidate_header_cache()
+
     @property
-    def kdf_algorithm(self):
-        """`str`: key derivation algorithm used by database during decryption.
-        Can be one of 'aeskdf', 'argon2', or 'argon2id'"""
+    def kdf_algorithm(self) -> str:
+        """KDF algorithm used by database. One of the KdfAlgorithm enum values."""
         if self.version == (3, 1):
             return 'aeskdf'
         elif self.version == (4, 0):
             kdf_parameters = self.kdbx.header.value.dynamic_header.kdf_parameters.data.dict
             if kdf_parameters['$UUID'].value == kdf_uuids['argon2']:
-                return 'argon2'
+                return 'argon2d'
             elif kdf_parameters['$UUID'].value == kdf_uuids['argon2id']:
                 return 'argon2id'
             elif kdf_parameters['$UUID'].value == kdf_uuids['aeskdf']:
                 return 'aeskdf'
+
+    @kdf_algorithm.setter
+    def kdf_algorithm(self, value: KdfAlgorithm | str) -> None:
+        """Set the KDF algorithm for the database. KDBX4 only.
+
+        Note:
+            Generates new KDF salt. For Argon2, uses default parameters.
+            For AES-KDF, uses default rounds. Adjust parameters after setting.
+        """
+        if self.version != (4, 0):
+            raise ValueError("KDF algorithm can only be changed on KDBX4 databases")
+
+        # Normalize value
+        kdf_str = str(value)
+        if kdf_str == 'argon2':
+            kdf_str = 'argon2d'  # Normalize legacy name
+
+        kdf = KdfAlgorithm(kdf_str)
+        salt = os.urandom(32)
+
+        if kdf in (KdfAlgorithm.ARGON2ID, KdfAlgorithm.ARGON2D):
+            config = Argon2Config(variant=kdf)
+            new_params = build_kdf_parameters_argon2(config, salt)
+        else:
+            config = AesKdfConfig()
+            new_params = build_kdf_parameters_aeskdf(config, salt)
+
+        self.kdbx.header.value.dynamic_header.kdf_parameters.data = new_params
+        self._invalidate_header_cache()
 
     def _get_kdf_parameters(self):
         """Get KDF parameters dict, raising error if not KDBX4 with Argon2."""

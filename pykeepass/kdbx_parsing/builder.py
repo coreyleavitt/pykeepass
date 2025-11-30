@@ -296,6 +296,26 @@ def build_kdf_parameters_argon2(kdf: Argon2Config, salt: bytes) -> Container:
     )
 
 
+def build_kdf_parameters_aeskdf(kdf: AesKdfConfig, salt: bytes) -> Container:
+    """Build KDBX4 KDF parameters VariantDictionary for AES-KDF.
+
+    Args:
+        kdf: AES-KDF configuration
+        salt: 32-byte random salt
+
+    Returns:
+        Container with VariantDictionary structure.
+    """
+    return Container(
+        version=b'\x00\x01',
+        dict={
+            '$UUID': Container(type=VD_BYTES, key='$UUID', value=kdf_uuids['aeskdf'], next_byte=VD_UINT64),
+            'R': Container(type=VD_UINT64, key='R', value=kdf.rounds, next_byte=VD_BYTES),
+            'S': Container(type=VD_BYTES, key='S', value=salt, next_byte=0x00),
+        }
+    )
+
+
 # -------------------- KDBX Structure Builders --------------------
 
 def build_kdbx4_structure(
