@@ -12,3 +12,5 @@ Pipfile.lock
 .venv*
 TMPNOTES
 docs/
+CLAUDE.md
+.claude/
