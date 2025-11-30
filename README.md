@@ -1,12 +1,9 @@
 # pykeepass
 
-<a href="https://github.com/libkeepass/pykeepass/actions/workflows/ci.yaml"><img src="https://github.com/libkeepass/pykeepass/actions/workflows/ci.yaml/badge.svg"/></a>
-<a href="https://libkeepass.github.io/pykeepass"><img src="https://readthedocs.org/projects/pykeepass/badge/?version=latest"/></a>
-<a href="https://matrix.to/#/%23pykeepass:matrix.org"><img src="https://img.shields.io/badge/chat-%23pykeepass-green"/></a>
+<a href="https://github.com/coreyleavitt/pykeepass/actions/workflows/ci.yaml"><img src="https://github.com/coreyleavitt/pykeepass/actions/workflows/ci.yaml/badge.svg"/></a>
+<a href="https://coreyleavitt.github.io/pykeepass"><img src="https://img.shields.io/badge/docs-pdoc-blue"/></a>
 
 This library allows you to read and write KeePass databases (KDBX3 and KDBX4 formats).
-
-Come chat at [#pykeepass:matrix.org](https://matrix.to/#/%23pykeepass:matrix.org) on Matrix.
 
 # Installation
 
