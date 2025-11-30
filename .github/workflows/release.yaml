@@ -31,11 +31,31 @@ jobs:
           uv version --bump ${{ inputs.bump }}
           echo "version=$(uv version --short)" >> $GITHUB_OUTPUT
 
-      - name: Commit version bump
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "Bump version to ${{ steps.bump.outputs.version }} [skip ci]"
-          file_pattern: pyproject.toml
+      - name: Commit version bump (signed via API)
+        run: |
+          VERSION="${{ steps.bump.outputs.version }}"
+          FILE_CONTENT=$(base64 -w 0 pyproject.toml)
+          BLOB_SHA=$(gh api repos/${{ github.repository }}/git/blobs \
+            -f content="$FILE_CONTENT" \
+            -f encoding=base64 \
+            --jq '.sha')
+          TREE_SHA=$(gh api repos/${{ github.repository }}/git/trees \
+            -f base_tree="${{ github.sha }}" \
+            -f "tree[][path]=pyproject.toml" \
+            -f "tree[][mode]=100644" \
+            -f "tree[][type]=blob" \
+            -f "tree[][sha]=$BLOB_SHA" \
+            --jq '.sha')
+          COMMIT_SHA=$(gh api repos/${{ github.repository }}/git/commits \
+            -f message="Bump version to $VERSION [skip ci]" \
+            -f tree="$TREE_SHA" \
+            -f "parents[]=${{ github.sha }}" \
+            --jq '.sha')
+          gh api repos/${{ github.repository }}/git/refs/heads/${{ github.ref_name }} \
+            -X PATCH \
+            -f sha="$COMMIT_SHA"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install dependencies
         run: |
